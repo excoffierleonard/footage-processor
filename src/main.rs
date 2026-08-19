@@ -148,6 +148,8 @@ fn run_ffmpeg(inputs: &[PathBuf], filter: &str, concat_list: &Path, output: &Pat
         .arg("vbr")
         .arg("-b:v")
         .arg("45M")
+        .arg("-r")
+        .arg("60")
         .arg("-pix_fmt")
         .arg("p010le")
         .arg("-c:a")
