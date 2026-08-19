@@ -120,7 +120,7 @@ fn run_ffmpeg(concat_list: &Path, filter: &str, output: &Path) -> Result<()> {
             "-rc",
             "vbr",
             "-b:v",
-            "45M",
+            "68M", // Youtube tops out at 68 Mbps for 4K60 SDR, so we don't need to go higher than that
             "-r",
             "60",
             "-pix_fmt",
