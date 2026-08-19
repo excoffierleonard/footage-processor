@@ -7,7 +7,7 @@ use std::process::Command;
 use tempfile::NamedTempFile;
 
 /// Concatenate DJI clips chronologically, crop to 16:9, apply a LUT, and encode to HEVC.
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 struct Args {
     /// Directory containing input .mp4 clips
     #[arg(long, default_value = "input")]
@@ -108,33 +108,26 @@ fn write_concat_list(inputs: &[PathBuf]) -> Result<NamedTempFile> {
 
 fn run_ffmpeg(concat_list: &Path, filter: &str, output: &Path) -> Result<()> {
     let status = Command::new("ffmpeg")
-        .arg("-y")
-        .arg("-f")
-        .arg("concat")
-        .arg("-safe")
-        .arg("0")
-        .arg("-i")
+        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(concat_list)
-        .arg("-map")
-        .arg("0:v:0")
-        .arg("-map")
-        .arg("0:a:0")
-        .arg("-vf")
+        .args(["-map", "0:v:0", "-map", "0:a:0", "-vf"])
         .arg(filter)
-        .arg("-c:v")
-        .arg("hevc_nvenc")
-        .arg("-preset")
-        .arg("p7")
-        .arg("-rc")
-        .arg("vbr")
-        .arg("-b:v")
-        .arg("45M")
-        .arg("-r")
-        .arg("60")
-        .arg("-pix_fmt")
-        .arg("p010le")
-        .arg("-c:a")
-        .arg("copy")
+        .args([
+            "-c:v",
+            "hevc_nvenc",
+            "-preset",
+            "p7",
+            "-rc",
+            "vbr",
+            "-b:v",
+            "45M",
+            "-r",
+            "60",
+            "-pix_fmt",
+            "p010le",
+            "-c:a",
+            "copy",
+        ])
         .arg(output)
         .status()
         .context("failed to run ffmpeg")?;
