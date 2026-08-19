@@ -2,8 +2,10 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tempfile::NamedTempFile;
 
 /// Concatenate DJI clips chronologically, crop to 16:9, apply a LUT, and encode to HEVC.
 #[derive(Parser, Debug)]
@@ -73,41 +75,83 @@ fn escape_filter_literal(value: &str) -> String {
     value.replace('\'', r"'\''")
 }
 
-fn build_filter(clip_count: usize, lut: &Path) -> Result<String> {
+/// Escapes a value for use inside a single-quoted concat demuxer list entry.
+fn escape_concat_literal(value: &str) -> String {
+    value.replace('\\', r"\\").replace('\'', r"\'")
+}
+
+/// Video-only concat (audio is handled separately via the concat demuxer so it
+/// can be stream-copied instead of re-encoded).
+fn build_video_filter(clip_count: usize, lut: &Path) -> Result<String> {
     let lut = lut
         .to_str()
         .with_context(|| format!("LUT path is not valid UTF-8: {}", lut.display()))?;
 
     let mut filter = String::new();
     for i in 0..clip_count {
-        let _ = write!(filter, "[{i}:v][{i}:a]");
+        let _ = write!(filter, "[{i}:v]");
     }
-    let _ = write!(filter, "concat=n={clip_count}:v=1:a=1[v][a];");
+    let _ = write!(filter, "concat=n={clip_count}:v=1:a=0[v];");
     filter.push_str("[v]crop=iw:iw*9/16[vc];");
     let _ = write!(
         filter,
-        "[vc]lut3d=file='{}'[vout]",
+        "[vc]lut3d=file='{}'[vl];",
         escape_filter_literal(lut)
+    );
+    filter.push_str(
+        "[vl]setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[vout]",
     );
     Ok(filter)
 }
 
-fn run_ffmpeg(inputs: &[PathBuf], filter: &str, output: &Path) -> Result<()> {
+/// Writes a concat-demuxer filelist so the audio streams can be concatenated
+/// and stream-copied at the packet level, with no re-encode.
+fn write_concat_list(inputs: &[PathBuf]) -> Result<NamedTempFile> {
+    let mut file = NamedTempFile::new().context("failed to create concat list temp file")?;
+    for input in inputs {
+        let absolute = fs::canonicalize(input)
+            .with_context(|| format!("failed to resolve path {}", input.display()))?;
+        let absolute = absolute
+            .to_str()
+            .with_context(|| format!("path is not valid UTF-8: {}", absolute.display()))?;
+        writeln!(file, "file '{}'", escape_concat_literal(absolute))
+            .context("failed to write concat list")?;
+    }
+    Ok(file)
+}
+
+fn run_ffmpeg(inputs: &[PathBuf], filter: &str, concat_list: &Path, output: &Path) -> Result<()> {
     let mut cmd = Command::new("ffmpeg");
     cmd.arg("-y");
     for input in inputs {
         cmd.arg("-i").arg(input);
     }
+    let audio_input = inputs.len();
+    cmd.arg("-f")
+        .arg("concat")
+        .arg("-safe")
+        .arg("0")
+        .arg("-i")
+        .arg(concat_list);
+
     cmd.arg("-filter_complex")
         .arg(filter)
         .arg("-map")
         .arg("[vout]")
         .arg("-map")
-        .arg("[a]")
+        .arg(format!("{audio_input}:a"))
         .arg("-c:v")
         .arg("hevc_nvenc")
+        .arg("-preset")
+        .arg("p7")
+        .arg("-rc")
+        .arg("vbr")
+        .arg("-b:v")
+        .arg("45M")
         .arg("-pix_fmt")
         .arg("p010le")
+        .arg("-c:a")
+        .arg("copy")
         .arg(output);
 
     let status = cmd.status().context("failed to run ffmpeg")?;
@@ -125,7 +169,8 @@ fn main() -> Result<()> {
         bail!("no .mp4 files found in {}", args.input_dir.display());
     }
 
-    let filter = build_filter(inputs.len(), &args.lut)?;
+    let filter = build_video_filter(inputs.len(), &args.lut)?;
     let output = output_path(&args.output_dir, &earliest_date(&inputs)?);
-    run_ffmpeg(&inputs, &filter, &output)
+    let concat_list = write_concat_list(&inputs)?;
+    run_ffmpeg(&inputs, &filter, concat_list.path(), &output)
 }
