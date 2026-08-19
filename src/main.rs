@@ -1,6 +1,8 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use google_youtube3::api::{Video, VideoSnippet, VideoStatus};
+use google_youtube3::api::{
+    PlaylistItem, PlaylistItemSnippet, ResourceId, Video, VideoSnippet, VideoStatus,
+};
 use google_youtube3::{YouTube, hyper_rustls, hyper_util, yup_oauth2};
 use log::info;
 use std::fs;
@@ -11,6 +13,7 @@ use tempfile::NamedTempFile;
 
 const CLIENT_SECRET_PATH: &str = "client_secret.json";
 const TOKEN_CACHE_PATH: &str = "youtube_token.json";
+const PLAYLIST_ID: &str = "PLrDx50RI8LwOsr-hccwOgM_BbTUxux5lf";
 
 /// Concatenate DJI clips chronologically, crop to 16:9, apply a LUT, and encode to HEVC.
 #[derive(Parser)]
@@ -186,10 +189,12 @@ async fn upload_to_youtube(video: &Path, title: &str) -> Result<()> {
     let video_resource = Video {
         snippet: Some(VideoSnippet {
             title: Some(title.to_string()),
+            category_id: Some("2".to_string()), // Autos & Vehicles
             ..Default::default()
         }),
         status: Some(VideoStatus {
             privacy_status: Some("private".to_string()),
+            contains_synthetic_media: Some(false),
             ..Default::default()
         }),
         ..Default::default()
@@ -197,11 +202,34 @@ async fn upload_to_youtube(video: &Path, title: &str) -> Result<()> {
 
     let file =
         fs::File::open(video).with_context(|| format!("failed to open {}", video.display()))?;
-    hub.videos()
+    let (_, uploaded) = hub
+        .videos()
         .insert(video_resource)
         .upload_resumable(file, "video/mp4".parse().expect("valid mime type"))
         .await
         .context("YouTube upload failed")?;
+    let video_id = uploaded
+        .id
+        .context("YouTube didn't return an id for the uploaded video")?;
+    info!("uploaded video {video_id}, adding to playlist");
+
+    let playlist_item = PlaylistItem {
+        snippet: Some(PlaylistItemSnippet {
+            playlist_id: Some(PLAYLIST_ID.to_string()),
+            resource_id: Some(ResourceId {
+                kind: Some("youtube#video".to_string()),
+                video_id: Some(video_id),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    hub.playlist_items()
+        .insert(playlist_item)
+        .doit()
+        .await
+        .context("failed to add video to playlist")?;
 
     Ok(())
 }
@@ -228,7 +256,7 @@ async fn main() -> Result<()> {
     info!("encode complete");
 
     info!("uploading to YouTube");
-    upload_to_youtube(&output, &format!("Motovlog - {date}")).await?;
+    Box::pin(upload_to_youtube(&output, &format!("Motovlog - {date}"))).await?;
     info!("upload complete");
 
     Ok(())
