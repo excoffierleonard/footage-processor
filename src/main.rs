@@ -1,10 +1,16 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use google_youtube3::api::{Video, VideoSnippet, VideoStatus};
+use google_youtube3::{YouTube, hyper_rustls, hyper_util, yup_oauth2};
+use log::info;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::NamedTempFile;
+
+const CLIENT_SECRET_PATH: &str = "client_secret.json";
+const TOKEN_CACHE_PATH: &str = "youtube_token.json";
 
 /// Concatenate DJI clips chronologically, crop to 16:9, apply a LUT, and encode to HEVC.
 #[derive(Parser)]
@@ -143,16 +149,87 @@ fn run_ffmpeg(concat_list: &Path, filter: &str, output: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+/// Uploads a video as a private, unlisted-by-default `YouTube` upload. Requires
+/// a Google Cloud OAuth client (see CLAUDE.md / project README for setup);
+/// the first run opens a browser for consent, after which the refresh token
+/// is cached at `TOKEN_CACHE_PATH` and later runs are silent.
+async fn upload_to_youtube(video: &Path, title: &str) -> Result<()> {
+    let secret = yup_oauth2::read_application_secret(CLIENT_SECRET_PATH)
+        .await
+        .with_context(|| format!("failed to read {CLIENT_SECRET_PATH}"))?;
+
+    let connector = || {
+        hyper_rustls::HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .context("failed to load native TLS roots")
+            .map(|b| b.https_or_http().enable_http2().build())
+    };
+
+    let auth_client =
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(connector()?);
+    let auth = yup_oauth2::InstalledFlowAuthenticator::with_client(
+        secret,
+        yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
+        yup_oauth2::client::CustomHyperClientBuilder::from(auth_client),
+    )
+    .persist_tokens_to_disk(TOKEN_CACHE_PATH)
+    .build()
+    .await
+    .context("failed to authenticate with Google")?;
+
+    let hub_client =
+        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
+            .build(connector()?);
+    let hub = YouTube::new(hub_client, auth);
+
+    let video_resource = Video {
+        snippet: Some(VideoSnippet {
+            title: Some(title.to_string()),
+            ..Default::default()
+        }),
+        status: Some(VideoStatus {
+            privacy_status: Some("private".to_string()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let file =
+        fs::File::open(video).with_context(|| format!("failed to open {}", video.display()))?;
+    hub.videos()
+        .insert(video_resource)
+        .upload_resumable(file, "video/mp4".parse().expect("valid mime type"))
+        .await
+        .context("YouTube upload failed")?;
+
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let args = Args::parse();
 
     let inputs = collect_inputs(&args.input_dir)?;
     if inputs.is_empty() {
         bail!("no .mp4 files found in {}", args.input_dir.display());
     }
+    info!("found {} input clip(s)", inputs.len());
 
     let filter = build_video_filter(&args.lut)?;
-    let output = output_path(&args.output_dir, &earliest_date(&inputs)?);
+    let date = earliest_date(&inputs)?;
+    let output = output_path(&args.output_dir, &date);
     let concat_list = write_concat_list(&inputs)?;
-    run_ffmpeg(concat_list.path(), &filter, &output)
+
+    info!("encoding to {}", output.display());
+    run_ffmpeg(concat_list.path(), &filter, &output)?;
+    info!("encode complete");
+
+    info!("uploading to YouTube");
+    upload_to_youtube(&output, &format!("Motovlog - {date}")).await?;
+    info!("upload complete");
+
+    Ok(())
 }
