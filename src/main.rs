@@ -121,8 +121,13 @@ fn run_ffmpeg(concat_list: &Path, filter: &str, output: &Path) -> Result<()> {
             "vbr",
             "-b:v",
             "68M", // Youtube tops out at 68 Mbps for 4K60 SDR, so we don't need to go higher than that
-            "-r",
-            "60",
+            "-rc-lookahead",
+            "20",
+            "-spatial_aq",
+            "1",
+            // no -temporal_aq: unsupported on Pascal (dev GTX 1070), only Turing+
+            "-multipass",
+            "fullres",
             "-pix_fmt",
             "p010le",
             "-c:a",
