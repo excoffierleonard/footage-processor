@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempfile::NamedTempFile;
 
-const CLIENT_SECRET_PATH: &str = "client_secret.json";
-const TOKEN_CACHE_PATH: &str = "youtube_token.json";
+const CLIENT_SECRET_FILENAME: &str = "client_secret.json";
+const TOKEN_CACHE_FILENAME: &str = "youtube_token.json";
 const PLAYLIST_ID: &str = "PLrDx50RI8LwOsr-hccwOgM_BbTUxux5lf";
 
 pub fn collect_inputs(dir: &Path) -> Result<Vec<PathBuf>> {
@@ -157,14 +157,18 @@ fn run_ffmpeg(concat_list: &Path, filter: &str, output: &Path, gpu_arch: GpuArch
 }
 
 /// Uploads a video as a private, unlisted-by-default `YouTube` upload. Requires
-/// a Google Cloud OAuth client (see CLAUDE.md / project README for setup);
-/// the first run opens a browser for consent, after which the refresh token
-/// is cached at `TOKEN_CACHE_PATH` and later runs are silent. Returns the
-/// uploaded video's id.
-async fn upload_video(video: &Path, title: &str) -> Result<String> {
-    let secret = yup_oauth2::read_application_secret(CLIENT_SECRET_PATH)
+/// a Google Cloud OAuth client (see CLAUDE.md / project README for setup) at
+/// `credentials_dir/client_secret.json`; the first run opens a browser for
+/// consent, after which the refresh token is cached at
+/// `credentials_dir/youtube_token.json` and later runs are silent. Returns
+/// the uploaded video's id.
+async fn upload_video(video: &Path, title: &str, credentials_dir: &Path) -> Result<String> {
+    let client_secret_path = credentials_dir.join(CLIENT_SECRET_FILENAME);
+    let token_cache_path = credentials_dir.join(TOKEN_CACHE_FILENAME);
+
+    let secret = yup_oauth2::read_application_secret(&client_secret_path)
         .await
-        .with_context(|| format!("failed to read {CLIENT_SECRET_PATH}"))?;
+        .with_context(|| format!("failed to read {}", client_secret_path.display()))?;
 
     let connector = || {
         hyper_rustls::HttpsConnectorBuilder::new()
@@ -181,7 +185,7 @@ async fn upload_video(video: &Path, title: &str) -> Result<String> {
         yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
         yup_oauth2::client::CustomHyperClientBuilder::from(auth_client),
     )
-    .persist_tokens_to_disk(TOKEN_CACHE_PATH)
+    .persist_tokens_to_disk(token_cache_path)
     .build()
     .await
     .context("failed to authenticate with Google")?;
@@ -218,10 +222,13 @@ async fn upload_video(video: &Path, title: &str) -> Result<String> {
         .context("YouTube didn't return an id for the uploaded video")
 }
 
-async fn add_to_playlist(video_id: &str, playlist_id: &str) -> Result<()> {
-    let secret = yup_oauth2::read_application_secret(CLIENT_SECRET_PATH)
+async fn add_to_playlist(video_id: &str, playlist_id: &str, credentials_dir: &Path) -> Result<()> {
+    let client_secret_path = credentials_dir.join(CLIENT_SECRET_FILENAME);
+    let token_cache_path = credentials_dir.join(TOKEN_CACHE_FILENAME);
+
+    let secret = yup_oauth2::read_application_secret(&client_secret_path)
         .await
-        .with_context(|| format!("failed to read {CLIENT_SECRET_PATH}"))?;
+        .with_context(|| format!("failed to read {}", client_secret_path.display()))?;
 
     let connector = || {
         hyper_rustls::HttpsConnectorBuilder::new()
@@ -238,7 +245,7 @@ async fn add_to_playlist(video_id: &str, playlist_id: &str) -> Result<()> {
         yup_oauth2::InstalledFlowReturnMethod::HTTPRedirect,
         yup_oauth2::client::CustomHyperClientBuilder::from(auth_client),
     )
-    .persist_tokens_to_disk(TOKEN_CACHE_PATH)
+    .persist_tokens_to_disk(token_cache_path)
     .build()
     .await
     .context("failed to authenticate with Google")?;
@@ -292,6 +299,7 @@ pub async fn process_batch(
     inputs: &[PathBuf],
     output_dir: &Path,
     lut: &Path,
+    credentials_dir: &Path,
     gpu_arch: GpuArch,
 ) -> Result<BatchOutcome> {
     let filter = build_video_filter(lut)?;
@@ -304,7 +312,8 @@ pub async fn process_batch(
     info!("encode complete");
 
     info!("uploading to YouTube");
-    let video_id = match upload_video(&output, &format!("Motovlog - {date}")).await {
+    let video_id = match upload_video(&output, &format!("Motovlog - {date}"), credentials_dir).await
+    {
         Ok(id) => id,
         Err(err) => {
             warn!("upload failed for {}: {err:#}", output.display());
@@ -313,7 +322,7 @@ pub async fn process_batch(
     };
     info!("uploaded video {video_id}, adding to playlist");
 
-    if let Err(err) = add_to_playlist(&video_id, PLAYLIST_ID).await {
+    if let Err(err) = add_to_playlist(&video_id, PLAYLIST_ID, credentials_dir).await {
         warn!("video {video_id} uploaded but not added to playlist; add manually: {err:#}");
     }
 

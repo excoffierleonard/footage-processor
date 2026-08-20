@@ -3,57 +3,39 @@ mod pipeline;
 mod watcher;
 
 use anyhow::{Context, Result};
-use clap::Parser;
 use log::{error, info};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use watcher::WaitOutcome;
 
-/// Watches a directory for DJI footage, and for each complete session
-/// (concatenate clips chronologically, crop to 16:9, apply a LUT, encode to
-/// HEVC), uploads the result to YouTube.
-#[derive(Parser)]
-struct Args {
-    /// Directory to watch for input .mp4 clips
-    #[arg(long, default_value = "input")]
-    input_dir: PathBuf,
-
-    /// Directory to write output files into
-    #[arg(long, default_value = "output")]
-    output_dir: PathBuf,
-
-    /// Directory successfully-processed clips are archived into
-    #[arg(long, default_value = "processed")]
-    processed_dir: PathBuf,
-
-    /// Directory clips from a failed batch are moved into (as failed_dir/<timestamp>/)
-    #[arg(long, default_value = "failed")]
-    failed_dir: PathBuf,
-
-    /// LUT file to apply
-    #[arg(
-        long,
-        default_value = "luts/DJI OSMO Action 6 D-LogM to Rec.709 LUT-11.17.cube"
-    )]
-    lut: PathBuf,
-
-    /// Seconds of filesystem quiet in input_dir before a batch is considered complete
-    #[arg(long, default_value_t = 300)]
-    quiet_period_secs: u64,
-}
+const INPUT_DIR: &str = "input";
+const OUTPUT_DIR: &str = "output";
+const PROCESSED_DIR: &str = "processed";
+const FAILED_DIR: &str = "failed";
+const CREDENTIALS_DIR: &str = "credentials";
+const LUT_PATH: &str = "luts/DJI OSMO Action 6 D-LogM to Rec.709 LUT-11.17.cube";
+const QUIET_PERIOD_SECS: u64 = 300;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let args = Args::parse();
 
-    fs::create_dir_all(&args.output_dir)
-        .with_context(|| format!("failed to create {}", args.output_dir.display()))?;
-    fs::create_dir_all(&args.processed_dir)
-        .with_context(|| format!("failed to create {}", args.processed_dir.display()))?;
-    fs::create_dir_all(&args.failed_dir)
-        .with_context(|| format!("failed to create {}", args.failed_dir.display()))?;
+    let input_dir = Path::new(INPUT_DIR);
+    let output_dir = Path::new(OUTPUT_DIR);
+    let processed_dir = Path::new(PROCESSED_DIR);
+    let failed_dir = Path::new(FAILED_DIR);
+    let credentials_dir = Path::new(CREDENTIALS_DIR);
+    let lut = Path::new(LUT_PATH);
+
+    fs::create_dir_all(output_dir)
+        .with_context(|| format!("failed to create {}", output_dir.display()))?;
+    fs::create_dir_all(processed_dir)
+        .with_context(|| format!("failed to create {}", processed_dir.display()))?;
+    fs::create_dir_all(failed_dir)
+        .with_context(|| format!("failed to create {}", failed_dir.display()))?;
+    fs::create_dir_all(credentials_dir)
+        .with_context(|| format!("failed to create {}", credentials_dir.display()))?;
 
     let gpu_arch = gpu::detect_gpu_arch()?;
     info!(
@@ -72,13 +54,13 @@ async fn main() -> Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
-    let mut watch = watcher::DirWatcher::new(&args.input_dir)?;
-    let quiet_period = Duration::from_secs(args.quiet_period_secs);
+    let mut watch = watcher::DirWatcher::new(input_dir)?;
+    let quiet_period = Duration::from_secs(QUIET_PERIOD_SECS);
 
-    info!("watching {} for new footage", args.input_dir.display());
+    info!("watching {} for new footage", input_dir.display());
     loop {
         let batch = match watch
-            .wait_for_batch(&args.input_dir, quiet_period, &mut shutdown_rx)
+            .wait_for_batch(input_dir, quiet_period, &mut shutdown_rx)
             .await?
         {
             WaitOutcome::Shutdown => break,
@@ -86,16 +68,16 @@ async fn main() -> Result<()> {
         };
         info!("batch ready: {} clip(s)", batch.len());
 
-        match pipeline::process_batch(&batch, &args.output_dir, &args.lut, gpu_arch).await {
+        match pipeline::process_batch(&batch, output_dir, lut, credentials_dir, gpu_arch).await {
             Ok(pipeline::BatchOutcome::Uploaded { date }) => {
                 info!(
                     "batch succeeded (date {date}), archiving clips to {}",
-                    args.processed_dir.display()
+                    processed_dir.display()
                 );
-                if let Err(err) = move_batch(&batch, &args.processed_dir) {
+                if let Err(err) = move_batch(&batch, processed_dir) {
                     error!(
                         "batch processed but failed to archive clips to {}: {err:#}",
-                        args.processed_dir.display()
+                        processed_dir.display()
                     );
                 }
             }
@@ -103,19 +85,19 @@ async fn main() -> Result<()> {
                 error!(
                     "upload failed for batch (date {date}); video saved locally, \
                      archiving clips to {} anyway (re-encoding won't help — retry the upload manually)",
-                    args.processed_dir.display()
+                    processed_dir.display()
                 );
-                if let Err(err) = move_batch(&batch, &args.processed_dir) {
+                if let Err(err) = move_batch(&batch, processed_dir) {
                     error!(
                         "additionally failed to archive clips to {}: {err:#}",
-                        args.processed_dir.display()
+                        processed_dir.display()
                     );
                 }
             }
             Err(err) => {
                 error!("batch failed: {err:#}");
                 let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
-                let dest = args.failed_dir.join(ts.to_string());
+                let dest = failed_dir.join(ts.to_string());
                 if let Err(err) = move_batch(&batch, &dest) {
                     error!(
                         "additionally failed to move clips to {}: {err:#}",
