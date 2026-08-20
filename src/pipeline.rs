@@ -6,6 +6,7 @@ use google_youtube3::api::{
 use google_youtube3::{YouTube, hyper_rustls, hyper_util, yup_oauth2};
 use log::{info, log_enabled, warn};
 use std::fs;
+use std::io;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -286,15 +287,20 @@ pub enum BatchOutcome {
 }
 
 /// Runs one batch (a session's worth of clips) through the full pipeline:
-/// concat + encode + upload + playlist.
+/// concat + encode + archive + upload + playlist. The raw clips are moved to
+/// `processed_dir` right after encoding, before the upload is even attempted
+/// — otherwise a successful upload followed by a failed archive (e.g. an
+/// EXDEV cross-mount rename) would leave the clips sitting in `input/` to be
+/// picked up and uploaded again as a duplicate on the next pass.
 ///
-/// Only an encode failure returns `Err` (routing the batch to `failed/` for
-/// manual retry). A playlist-insert failure after a successful upload is
-/// logged but doesn't fail the batch — retrying would re-upload a duplicate
-/// video, which is worse than a video missing from the playlist.
+/// Only an encode (or archive) failure returns `Err` (routing the batch to
+/// `failed/` for manual retry). A playlist-insert failure after a successful
+/// upload is logged but doesn't fail the batch — retrying would re-upload a
+/// duplicate video, which is worse than a video missing from the playlist.
 pub async fn process_batch(
     inputs: &[PathBuf],
     output_dir: &Path,
+    processed_dir: &Path,
     lut: &Path,
     client_secret: &yup_oauth2::ApplicationSecret,
     token_cache: &Path,
@@ -308,6 +314,9 @@ pub async fn process_batch(
     info!("encoding to {}", output.display());
     run_ffmpeg(concat_list.path(), &filter, &output, gpu_arch)?;
     info!("encode complete");
+
+    info!("archiving clips to {}", processed_dir.display());
+    move_batch(inputs, processed_dir)?;
 
     info!("uploading to YouTube");
     let video_id = match upload_video(
@@ -331,4 +340,35 @@ pub async fn process_batch(
     }
 
     Ok(BatchOutcome::Uploaded { date })
+}
+
+pub fn move_batch(inputs: &[PathBuf], dest_dir: &Path) -> Result<()> {
+    fs::create_dir_all(dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+    for input in inputs {
+        let name = input
+            .file_name()
+            .with_context(|| format!("input path has no file name: {}", input.display()))?;
+        let dest = dest_dir.join(name);
+        // input/, processed/, and failed/ are separate bind mounts in Docker,
+        // so they can land on different filesystems even though they're all
+        // on the same host disk — rename() can't cross that, so fall back to
+        // copy+remove.
+        match fs::rename(input, &dest) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {
+                fs::copy(input, &dest).with_context(|| {
+                    format!("failed to copy {} to {}", input.display(), dest.display())
+                })?;
+                fs::remove_file(input)
+                    .with_context(|| format!("failed to remove {}", input.display()))?;
+            }
+            Err(err) => {
+                return Err(err).with_context(|| {
+                    format!("failed to move {} to {}", input.display(), dest.display())
+                });
+            }
+        }
+    }
+    Ok(())
 }

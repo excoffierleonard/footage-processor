@@ -8,7 +8,7 @@ use log::{error, info};
 use std::env;
 use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 use tempfile::Builder;
 use watcher::WaitOutcome;
@@ -110,6 +110,7 @@ async fn main() -> Result<()> {
         match pipeline::process_batch(
             &batch,
             output_dir,
+            processed_dir,
             lut,
             &client_secret,
             &token_cache,
@@ -118,35 +119,20 @@ async fn main() -> Result<()> {
         .await
         {
             Ok(pipeline::BatchOutcome::Uploaded { date }) => {
-                info!(
-                    "batch succeeded (date {date}), archiving clips to {}",
-                    processed_dir.display()
-                );
-                if let Err(err) = move_batch(&batch, processed_dir) {
-                    error!(
-                        "batch processed but failed to archive clips to {}: {err:#}",
-                        processed_dir.display()
-                    );
-                }
+                info!("batch succeeded (date {date})");
             }
             Ok(pipeline::BatchOutcome::UploadFailed { date }) => {
                 error!(
                     "upload failed for batch (date {date}); video saved locally, \
-                     archiving clips to {} anyway (re-encoding won't help — retry the upload manually)",
+                     clips already archived to {} (re-encoding won't help — retry the upload manually)",
                     processed_dir.display()
                 );
-                if let Err(err) = move_batch(&batch, processed_dir) {
-                    error!(
-                        "additionally failed to archive clips to {}: {err:#}",
-                        processed_dir.display()
-                    );
-                }
             }
             Err(err) => {
                 error!("batch failed: {err:#}");
                 let ts = chrono::Local::now().format("%Y%m%dT%H%M%S");
                 let dest = failed_dir.join(ts.to_string());
-                if let Err(err) = move_batch(&batch, &dest) {
+                if let Err(err) = pipeline::move_batch(&batch, &dest) {
                     error!(
                         "additionally failed to move clips to {}: {err:#}",
                         dest.display()
@@ -159,23 +145,5 @@ async fn main() -> Result<()> {
     }
 
     info!("shutdown complete");
-    Ok(())
-}
-
-fn move_batch(inputs: &[PathBuf], dest_dir: &Path) -> Result<()> {
-    fs::create_dir_all(dest_dir)
-        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
-    for input in inputs {
-        let name = input
-            .file_name()
-            .with_context(|| format!("input path has no file name: {}", input.display()))?;
-        fs::rename(input, dest_dir.join(name)).with_context(|| {
-            format!(
-                "failed to move {} to {}",
-                input.display(),
-                dest_dir.display()
-            )
-        })?;
-    }
     Ok(())
 }
