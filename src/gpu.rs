@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::process::{Command, Stdio};
+use nvml_wrapper::Nvml;
 
 /// NVENC feature set differs by GPU generation. `-temporal_aq` requires
 /// Turing (compute capability 7.5) or newer; Pascal (dev GTX 1070, 6.1)
@@ -10,47 +10,24 @@ pub enum GpuArch {
     TuringOrNewer,
 }
 
-const UNSUPPORTED_MARKER: &str = "Temporal AQ not supported";
+const TURING_COMPUTE_CAP: (i32, i32) = (7, 5);
 
-/// Probes NVENC's `temporal_aq` support with a throwaway single-frame encode.
-/// ffmpeg queries the hardware's NVENC capabilities itself and logs
-/// `Temporal AQ not supported` when it does, regardless of whether the
-/// encode goes on to succeed, so we key off that message rather than the
-/// exit status.
 pub fn detect_gpu_arch() -> Result<GpuArch> {
-    let output = Command::new("ffmpeg")
-        .args([
-            "-loglevel",
-            "warning",
-            "-f",
-            "lavfi",
-            "-i",
-            "color=black:size=64x64:duration=0.1:rate=1",
-            "-c:v",
-            "hevc_nvenc",
-            "-temporal_aq",
-            "1",
-            "-frames:v",
-            "1",
-            "-f",
-            "null",
-            "-",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .context("failed to run ffmpeg (is it installed?)")?;
-
-    Ok(arch_from_probe_stderr(&String::from_utf8_lossy(
-        &output.stderr,
-    )))
+    let nvml = Nvml::init().context("failed to load NVML (is the NVIDIA driver installed?)")?;
+    let device = nvml
+        .device_by_index(0)
+        .context("failed to get GPU 0 from NVML")?;
+    let cap = device
+        .cuda_compute_capability()
+        .context("failed to query CUDA compute capability")?;
+    Ok(compute_cap_to_arch((cap.major, cap.minor)))
 }
 
-fn arch_from_probe_stderr(stderr: &str) -> GpuArch {
-    if stderr.contains(UNSUPPORTED_MARKER) {
-        GpuArch::PascalOrOlder
-    } else {
+fn compute_cap_to_arch(cap: (i32, i32)) -> GpuArch {
+    if cap >= TURING_COMPUTE_CAP {
         GpuArch::TuringOrNewer
+    } else {
+        GpuArch::PascalOrOlder
     }
 }
 
@@ -59,19 +36,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pascal_logs_unsupported_warning() {
-        assert_eq!(
-            arch_from_probe_stderr("[hevc_nvenc @ 0x0] Temporal AQ not supported\n"),
-            GpuArch::PascalOrOlder
-        );
+    fn pascal_compute_cap() {
+        assert_eq!(compute_cap_to_arch((6, 1)), GpuArch::PascalOrOlder);
     }
 
     #[test]
-    fn turing_and_ampere_accept_the_flag() {
-        assert_eq!(arch_from_probe_stderr(""), GpuArch::TuringOrNewer);
-        assert_eq!(
-            arch_from_probe_stderr("[hevc_nvenc @ 0x0] Temporal AQ enabled.\n"),
-            GpuArch::TuringOrNewer
-        );
+    fn turing_and_ampere_compute_cap() {
+        assert_eq!(compute_cap_to_arch((7, 5)), GpuArch::TuringOrNewer);
+        assert_eq!(compute_cap_to_arch((8, 6)), GpuArch::TuringOrNewer);
     }
 }
