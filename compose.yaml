@@ -11,9 +11,10 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      - YOUTUBE_CREDENTIALS=${YOUTUBE_CREDENTIALS}
     volumes:
       - ./input:/app/input
       - ./output:/app/output
       - ./processed:/app/processed
       - ./failed:/app/failed
-      - ./credentials:/app/credentials
