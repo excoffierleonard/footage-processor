@@ -5,8 +5,10 @@ mod watcher;
 use anyhow::{Context, Result};
 use log::{error, info};
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tempfile::Builder;
 use watcher::WaitOutcome;
 
 const INPUT_DIR: &str = "input";
@@ -14,8 +16,11 @@ const OUTPUT_DIR: &str = "output";
 const PROCESSED_DIR: &str = "processed";
 const FAILED_DIR: &str = "failed";
 const CREDENTIALS_DIR: &str = "credentials";
-const LUT_PATH: &str = "luts/DJI OSMO Action 6 D-LogM to Rec.709 LUT-11.17.cube";
 const QUIET_PERIOD_SECS: u64 = 300;
+
+/// Embedded at build time so the container image needs no LUT file or mount.
+const LUT_BYTES: &[u8] =
+    include_bytes!("../luts/DJI OSMO Action 6 D-LogM to Rec.709 LUT-11.17.cube");
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,7 +31,15 @@ async fn main() -> Result<()> {
     let processed_dir = Path::new(PROCESSED_DIR);
     let failed_dir = Path::new(FAILED_DIR);
     let credentials_dir = Path::new(CREDENTIALS_DIR);
-    let lut = Path::new(LUT_PATH);
+
+    let mut lut_file = Builder::new()
+        .suffix(".cube")
+        .tempfile()
+        .context("failed to create temp file for embedded LUT")?;
+    lut_file
+        .write_all(LUT_BYTES)
+        .context("failed to write embedded LUT to temp file")?;
+    let lut = lut_file.path();
 
     fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;

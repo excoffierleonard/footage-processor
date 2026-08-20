@@ -17,4 +17,3 @@ services:
       - ./processed:/app/processed
       - ./failed:/app/failed
       - ./credentials:/app/credentials
-      - ./luts:/app/luts:ro
